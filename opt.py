@@ -30,8 +30,8 @@ def choose_dataset(dataset):
         data_dict['scores'] = [data_dict['sites'], data_dict['genders'], data_dict['ages']]
         data_dict['use_excel_features'] = False  # 新增：标识使用Excel特征
     elif dataset == "TY":
-        data_dict['num_subjects'] = 126
-        # data_dict['num_subjects'] = 196
+        # data_dict['num_subjects'] = 126
+        data_dict['num_subjects'] = 196
         # data_dict['num_subjects'] = 163  # 您的被试数量
         data_dict['num_classes'] = 2
         data_dict['key'] = '编号'

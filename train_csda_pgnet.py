@@ -27,7 +27,7 @@ def train():
         optimizer.zero_grad()
         # 确保梯度计算开启 ：在上下文块内，所有张量操作都会进行梯度跟踪和计算
         with torch.set_grad_enabled(True):
-            outputs, graph_loss = model(x, ph_features, affinity_graphs)
+            outputs, graph_loss = model(x_fold, ph_features, affinity_graphs)
         outputs_train = outputs[train_ind]
         # 组成部分： 分类损失 ：衡量预测标签与真实标签的差异 图损失 ：包括平滑性损失、度损失和奖励损失，用于正则化图结构
         loss = loss_fn(outputs_train, labels[train_ind]) + graph_loss
@@ -59,7 +59,7 @@ def train():
 # model.eval() 是 PyTorch 中用于将模型设置为 评估模式
         model.eval()
         with torch.set_grad_enabled(False):
-            outputs, graph_loss = model(x, ph_features, affinity_graphs)
+            outputs, graph_loss = model(x_fold, ph_features, affinity_graphs)
         loss_val = loss_fn(outputs[val_ind], labels[val_ind]) + graph_loss
         if opt.log_save:
             writer.add_scalar("val\tloss", loss_val.item(), epoch)
@@ -146,8 +146,11 @@ def evaluate():
     print("  Number of testing samples %d" % len(test_ind))
     print("  Start testing...")
     model.load_state_dict(torch.load(fold_model_path), strict=False)
+    # 完整检查点已包含 VAE 权重，无需再次加载独立预训练文件。
+    model.vae.requires_grad_(False)
+    model.load_pretrain = False
     model.eval()
-    outputs, _ = model(x, ph_features, affinity_graphs)
+    outputs, _ = model(x_fold, ph_features, affinity_graphs)
     outputs_test = outputs[test_ind].detach().cpu().numpy()
 
 
@@ -319,8 +322,8 @@ if __name__ == "__main__":
     # 用于加载多模态数据，包括功能连接特征、标签和表型数据。 
     # save=False ：布尔值参数，控制是否保存加载的数据到磁盘  True ：加载后将数据保存为 .pt 文件
     # return self.features, self.labels, self.ph_dict, self.ph_data
-        x, y, ph_dict, ph_data = dl.load_data(save=False)
-        print(f'x:{x},x.shape:{x.shape}')
+        x_original, y, ph_dict, ph_data = dl.load_data(save=False)
+        print(f'x:{x_original},x.shape:{x_original.shape}')
         print(f'y:{y},y.shape:{y.shape}')
         # print(f'ph_dict:{ph_dict},ph_dict.shape:{ph_dict.shape}')
         print(f'ph_data:{ph_data},ph_data.shape:{ph_data.shape}')
@@ -350,7 +353,11 @@ if __name__ == "__main__":
             test_ind = cv_splits[fold][2]   # 测试集索引
 
             # feature_selection
-            x = feature_selection(x, y, train_ind, opt.node_dim)
+            x_fold, feature_indices = feature_selection(
+                x_original, y, train_ind, opt.node_dim, return_indices=True)
+            if opt.train == 1:
+                os.makedirs(opt.ckpt_path or '.', exist_ok=True)
+                np.save(os.path.join(opt.ckpt_path, f'fold{fold}_rfe_indices.npy'), feature_indices)
 
     # torch.from_numpy() 函数用于将 NumPy 数组转换为 PyTorch 张量
             affinity_graphs = torch.from_numpy(

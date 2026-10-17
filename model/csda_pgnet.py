@@ -7,7 +7,7 @@ import pandas as pd
 from utils.tools import cal_feature_sim, EarlyStopping
 from model.gtunet import GTUNet
 import os
-from modules.module1.ACL import AdaptiveConfidenceLearning
+from modules.module1.PAE import PAE
 from modules.module2.fil import FILmodule
 from modules.module3.CrossModalFineGrainedAttention import CrossModalFineGrainedAttention
 from modules.module4.SAGPool import SAGPool
@@ -89,17 +89,12 @@ class VAE(nn.Module):
             - 输入形状： [batch_size, 256]
             - 输出形状： [batch_size, 3]
 
-        - nn.Sigmoid() ：
-            - Sigmoid 激活函数，将输出值压缩到 [0, 1] 范围
-            - 数学表达： f(x) = 1 / (1 + e^(-x))
-            - 这适用于处理像表型特征这样可能归一化到此范围的数据
+        - 输出层不使用 Sigmoid，允许重建原始年龄和序数编码等超出 [0, 1] 的表型值。
         """
         self.decoder = nn.Sequential(
             nn.Linear(self.latent_dim, self.hidden_dim),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, self.input_dim),
-            # used to process input data in the range [0, 1]
-            nn.Sigmoid()
         )
         # the reconstruction loss function uses mean square error
         self.criterion = nn.MSELoss(reduction='sum')
@@ -120,12 +115,14 @@ class VAE(nn.Module):
         - 来源：编码器输出 mu_logvar 的后半部分
         - 含义：表示潜在空间中每个维度的对数方差（log variance）
         ## 输出
-        - z ：从潜在分布中采样得到的潜在向量
+        - z ：训练时从潜在分布中采样，评估时直接使用均值 mu
         - 数据类型： torch.Tensor
         - 形状： [batch_size, latent_dim]
         - 含义：表示输入数据在潜在空间中的表示
         
         """
+        if not self.training:
+            return mu
         std = torch.exp(0.5 * logvar)# 步骤1：计算标准差
         eps = torch.randn_like(std)# 步骤2：生成标准正态分布的随机噪声
         return mu + eps * std # 步骤3：重参数化采样
@@ -151,7 +148,7 @@ class VAE(nn.Module):
         ## 输出
         - recon_x ：这是一个张量，包含了解码器重构出的表型特征
         - 形状 ： [batch_size, input_dim] ，其中 input_dim 是在 VAE 类的 __init__ 方法中通过 len(args.scores) 定义的，表示原始表型特征的数量
-        - 数值范围 ： recon_x 的值在 [0, 1] 之间，因为解码器的最后一层使用了 nn.Sigmoid() 激活函数
+        - 数值范围 ：输出不限制在 [0, 1]，用于重建原始尺度的表型特征
         """
         recon_x = self.decoder(z)
         # calculate the reconstruction loss
@@ -271,7 +268,7 @@ class Multimodal_Attention(nn.Module):
         img_shared_score = self.cal_attention_score(img_attention, shared_attention)
         ph_shared_score = self.cal_attention_score(ph_attention, shared_attention)
         
-        attention_scores = F.softmax(torch.tensor([img_shared_score, ph_shared_score]), dim=0)
+        attention_scores = F.softmax(torch.stack([img_shared_score, ph_shared_score]), dim=0)
         img_weight = attention_scores[0]
         ph_weight = attention_scores[1]
         # 消融实验：权重设置，完全依赖表型特征
@@ -301,14 +298,10 @@ class CSDAPGNet(nn.Module):
         self.setup_vae_pretrain()
         self.setup_attenton()
 
-        # # 添加ACL模块-module1
+        # DSAF-PG：复用 PAE 的共享投影网络，学习双源融合系数。
         if args.module1 == 1:
-            self.acl_module = AdaptiveConfidenceLearning(args)
-            # self.alpha_fusion = args.alpha_fusion if hasattr(args, 'alpha_fusion') else 0.7  # 融合权重
-            if (args.dataset == 'TY'):
-                self.alpha_fusion = 0.8
-            else:
-                self.alpha_fusion = 0.8
+            self.dynamic_projection = PAE(input_dim=args.node_dim, dropout=args.dropout).parser
+            self.gamma_logit = nn.Parameter(torch.zeros(()))  # gamma 初始为 0.5
 
             # 添加fil模块-module2
         if args.module2 == 1 and args.module1 == 1:
@@ -385,6 +378,8 @@ class CSDAPGNet(nn.Module):
         # freeze the parameters
         for param in self.vae.parameters():
             param.requires_grad = False
+        self.vae.eval()
+        self.load_pretrain = False
 
     def train_vae(self, ph_features):
         print("Start pretraining vae...")
@@ -451,6 +446,7 @@ class CSDAPGNet(nn.Module):
                 break
 
         print("\r\n => Fold {} best pretrain vae loss {:.5f}, epoch {}\n".format(self.fold, best_loss, best_epo))
+        self.load_vae()
 
     def create_rp_graph(self, affinity_graphs):
         """
@@ -526,17 +522,8 @@ class CSDAPGNet(nn.Module):
         affinity_graphs = affinity_graphs.to(self.device)
 
 
-        # ph_features111 : 表型特征张量 形状： [num_subjects, num_phenotypic_features]
-        if self.args.module1 == 1:
-            if self.args.dataset == 'TY':
-                # print('TY dataset')
-                ph_features111 = ph_features[:, :3].clone()
-            else:
-                # print('Other dataset,')
-                ph_features111 = ph_features
-
         # reconstruction of phenotypic features
-        # self.load_pretrain ：布尔值，在 CSDAPGNet 类的 __init__ 方法中被设置为 True
+        # 直接前向时仅首次加载；预训练或完整检查点加载后跳过。
         if self.load_pretrain:
             # - 模型参数加载 ：将预训练的 VAE 模型参数加载到 self.vae 中
             # - 参数冻结 ：将 VAE 模型的所有参数设置为不可训练状态（ requires_grad = False ）
@@ -559,6 +546,8 @@ class CSDAPGNet(nn.Module):
         - reconstruction_loss ：重构损失，衡量重构数据与原始数据的差异
         - kl_divergence ：KL散度损失，正则化潜在空间分布
         """
+        # 主模型训练与评估均使用冻结 VAE 的均值表示。
+        self.vae.eval()
         ph_features, _ = self.vae(ph_features)
 
         
@@ -597,12 +586,15 @@ class CSDAPGNet(nn.Module):
 
         self.fused_sim = cal_feature_sim(fused_embed)
 
-        # compute adaptive reward population graph
-        # self.fused_graph ：自适应融合图 形状：[num_subjects, num_subjects]
-        # 含义：结合了特征相似性和表型信息的最终图结构
-        # 作用：既保留了多模态特征的相似性信息，又融入了基于表型数据的自适应权重
-        # fused_graph[i][j] = fused_sim[i][j] × rp_graph[i][j] 
-        self.fused_graph = self.fused_sim * self.rp_graph
+        # A_base：多模态语义相似度与 AMRS 先验亲和度的乘积。
+        self.base_graph = self.fused_sim * self.rp_graph
+        self.fused_graph = self.base_graph
+        if self.args.module1 == 1:
+            # 式（16）—（18）：使用 CMSAA 后的表型嵌入构造完整动态图。
+            projected_ph = F.normalize(self.dynamic_projection(ph_features), p=2, dim=1, eps=1e-8)
+            self.dynamic_graph = ((projected_ph @ projected_ph.T + 1) * 0.5).clamp(0, 1)
+            gamma = torch.sigmoid(self.gamma_logit)
+            self.fused_graph = gamma * self.base_graph + (1 - gamma) * self.dynamic_graph
         """
         功能 ：将密集邻接矩阵转换为稀疏图表示格式
 
@@ -629,16 +621,9 @@ class CSDAPGNet(nn.Module):
         # print('fused_index.shape:'+ str(fused_index.shape))
         # print('fused_attr:'+ str(fused_attr))
         # print('fused_attr.shape:'+ str(fused_attr.shape))
-        # **新增：ACL模块生成边重要性权重Q**
+        # 沿用下游边权变量；传播和图正则均基于双源融合后的完整图。
         if self.args.module1 == 1:
-            Q_weights = self.acl_module( ph_features111, fused_index)
-            enhanced_attr = self.alpha_fusion * fused_attr + (1 - self.alpha_fusion) * Q_weights
-        # print('Q_weights:'+ str(Q_weights))
-        # print('Q_weights.shape:'+ str(Q_weights.shape))
-        # **融合原有权重和ACL权重**
-            
-        # print('self.alpha_fusion:'+ str(self.alpha_fusion))
-        # print('enhanced_attr:'+ str(enhanced_attr))
+            enhanced_attr = fused_attr
         
         
 
@@ -687,7 +672,7 @@ class CSDAPGNet(nn.Module):
         fused_mask = torch.tensor([True, False, True, True])  # 第2条边被丢弃
         """
         if self.training and (self.edge_drop > 0):
-            fused_index, fused_mask = dropout_edge(fused_index)
+            fused_index, fused_mask = dropout_edge(fused_index, p=self.edge_drop)
             if self.args.module1 == 1:
                 enhanced_attr = enhanced_attr[fused_mask]
             else:

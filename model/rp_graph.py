@@ -152,5 +152,5 @@ def create_reward_penalty_graph(ph_dict, labels, train_idx, val_idx, test_idx, a
                 for v in test_idx:
                     motivation_graph[l, i, v] += 1
 
-        final_graph = np.stack((reward_graph, penalty_graph, motivation_graph), axis=1)
-        return final_graph
+    final_graph = np.stack((reward_graph, penalty_graph, motivation_graph), axis=1)
+    return final_graph

@@ -440,7 +440,7 @@ def ordinal_encoding(data_dict):
     return int_dict
 
 
-def feature_selection(matrix, labels, train_ind, fnum, tensor=True):
+def feature_selection(matrix, labels, train_ind, fnum, tensor=True, return_indices=False):
     """
     ## 功能
     feature_selection 函数使用递归特征消除（RFE）方法结合岭回归分类器进行特征选择，
@@ -451,6 +451,7 @@ def feature_selection(matrix, labels, train_ind, fnum, tensor=True):
     - y ( torch.Tensor 或 numpy.ndarray ): 标签向量，形状为 (num_subjects,) ，包含所有被试的分类标签（如正常/患病）
     - train_ind ( list 或 numpy.ndarray ): 训练样本的索引列表，用于指定哪些样本用于训练特征选择器
     - opt.node_dim ( int ): 特征选择后保留的特征数量，即目标维度
+    - return_indices ( bool ): 是否同时返回选中的原始特征列索引，默认 False
     ## 输出结果
     - x ( torch.Tensor ): 降维后的特征矩阵，形状为 (num_subjects, opt.node_dim) ，包含所有被试的选定特征
     """
@@ -468,6 +469,8 @@ def feature_selection(matrix, labels, train_ind, fnum, tensor=True):
     print("Number of labeled samples %d" % len(train_ind))
     print("Number of features selected %d" % x_data.shape[1])
 
+    if return_indices:
+        return x_data, selector.get_support(indices=True)
     return x_data
 
 
